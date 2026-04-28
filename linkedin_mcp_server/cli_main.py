@@ -23,6 +23,7 @@ from linkedin_mcp_server.drivers.browser import (
     set_headless,
 )
 from linkedin_mcp_server.debug_trace import should_keep_traces
+from linkedin_mcp_server.hardening import install_exception_hooks
 from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
@@ -260,6 +261,10 @@ def get_version() -> str:
 
 def main() -> None:
     """Main application entry point."""
+    # Install crash-hardening hooks as early as possible so any startup
+    # exception (import error, bad config, etc.) is captured in the log.
+    install_exception_hooks()
+
     config = get_config()
 
     # Configure logging

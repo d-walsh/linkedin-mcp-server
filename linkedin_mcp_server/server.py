@@ -5,6 +5,7 @@ Creates and configures the MCP server with comprehensive LinkedIn tool suite inc
 person profiles, company data, job information, and session management capabilities.
 """
 
+import asyncio
 import logging
 from typing import Any, AsyncIterator
 
@@ -19,6 +20,12 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.hardening import (
+    asyncio_exception_handler,
+    health_data,
+    heartbeat,
+    install_exception_hooks,
+)
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -39,10 +46,20 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     del app
     logger.info("LinkedIn MCP Server starting...")
+    install_exception_hooks()
+    # Install asyncio handler now that the loop is running.
+    asyncio.get_event_loop().set_exception_handler(asyncio_exception_handler)
+    # Start background heartbeat task.
+    heartbeat_task = asyncio.create_task(heartbeat(), name="linkedin-mcp-heartbeat")
     initialize_bootstrap(get_runtime_policy())
     await start_background_browser_setup_if_needed()
     yield {}
     logger.info("LinkedIn MCP Server shutting down...")
+    heartbeat_task.cancel()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
     await close_browser()
 
 
@@ -78,5 +95,32 @@ def create_mcp_server() -> FastMCP:
             }
         except Exception as e:
             raise_tool_error(e, "close_session")  # NoReturn
+
+    # Register health self-check tool
+    @mcp.tool(
+        timeout=30.0,
+        title="LinkedIn MCP Health",
+        annotations={"readOnlyHint": True},
+        tags={"health"},
+    )
+    async def linkedin_health_self() -> dict[str, Any]:
+        """Return server health diagnostics.
+
+        Returns uptime, total tool calls, last error (tool name + message +
+        seconds ago), log file path, and whether the browser session is currently
+        alive. Use this to verify the server is running correctly.
+        """
+        from linkedin_mcp_server.drivers.browser import _browser  # noqa: PLC0415
+
+        browser_alive: bool | None = None
+        try:
+            if _browser is not None:
+                browser_alive = _browser.is_authenticated
+            else:
+                browser_alive = False
+        except Exception:
+            browser_alive = None
+
+        return health_data(browser_session_alive=browser_alive)
 
     return mcp
